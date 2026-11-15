@@ -33,6 +33,7 @@ function Host() {
   const [files, setFiles] = useState([]);
   const [pending, setPending] = useState([]);
   const [share, setShare] = useState(null);
+  const [canManage, setCanManage] = useState(false);
   const [address, setAddress] = useState('');
   const [port, setPort] = useState(5173);
   const [message, setMessage] = useState('');
@@ -45,7 +46,8 @@ function Host() {
 
   useEffect(() => {
     api('/api/network').then((info) => { setAddress(info.address); setPort(window.location.port === '5173' ? info.devPort : info.prodPort); }).catch(() => {});
-    api('/api/share').then(({ share: current }) => {
+    api('/api/share').then(({ share: current, canManage: allowed }) => {
+      setCanManage(Boolean(allowed));
       if (current) { setShare(current); setFiles(current.files); setMessage(current.message || ''); }
     }).catch(() => {});
   }, []);
@@ -125,27 +127,27 @@ function Host() {
     <main className="host-layout">
       <section className="main-column">
         <div className="intro"><span className="eyebrow"><span className="eyebrow-line" /> SEND IT CLOSE BY</span><h1>Good things are<br /><em>better shared.</em></h1><p>Send files to people on the same Wi-Fi. No accounts, no cloud, just nearby.</p></div>
-        <section className={`dropzone ${dragging ? 'is-dragging' : ''}`} aria-label="Add files" onClick={() => inputRef.current?.click()}>
+        {canManage && <section className={`dropzone ${dragging ? 'is-dragging' : ''}`} aria-label="Add files" onClick={() => inputRef.current?.click()}>
           <input ref={inputRef} type="file" multiple hidden onChange={(e) => { takeFiles(e.target.files); e.target.value = ''; }} />
           <span className="upload-icon"><CloudUpload size={24} /></span>
           <div className="drop-copy"><strong>Drop files here</strong><span>or browse from your device</span></div>
           <button className="outline-button" type="button" onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }}><Plus size={17} /> Choose files</button>
           <small>Up to 2 GB per file · stays on your local network</small>
-        </section>
+        </section>}
 
         <section className="file-section">
-          <div className="section-heading"><div><span className="eyebrow muted">YOUR SHARE</span><h2>Files <span className="count">{allFiles.length}</span></h2></div>{share && <button className="text-button" onClick={() => inputRef.current?.click()}><Plus size={16} /> Add more</button>}</div>
-          {allFiles.length === 0 ? <div className="empty-files"><span className="empty-icon"><Upload size={19} /></span><div><strong>Your files will show up here</strong><p>Pick a few things to get started.</p></div></div> : <ul className="file-list">{allFiles.map((file, index) => <li className="file-row" key={file.id || `${file.name}-${index}`}><FileGlyph type={file.type} /><div className="file-meta"><strong title={file.name}>{file.name}</strong><span>{formatSize(file.size)}</span></div><button className="icon-button download-control" type="button" aria-label={`Download ${file.name}`} title="Download file" onClick={() => downloadFile(file)}><ArrowDownToLine size={17} /></button><button className="icon-button" type="button" aria-label={`Remove ${file.name}`} title="Remove file" onClick={() => share ? removeFile(file.id) : removePending(index)}><X size={17} /></button></li>)}</ul>}
-          {!share && <button className="primary-button start-button" disabled={busy} onClick={start}>{busy ? <LoaderCircle size={18} className="spin" /> : <Share2 size={18} />}{busy ? 'Getting things ready…' : 'Start sharing'}<span className="button-arrow">→</span></button>}
+          <div className="section-heading"><div><span className="eyebrow muted">YOUR SHARE</span><h2>Files <span className="count">{allFiles.length}</span></h2></div>{share && canManage && <button className="text-button" onClick={() => inputRef.current?.click()}><Plus size={16} /> Add more</button>}</div>
+          {allFiles.length === 0 ? <div className="empty-files"><span className="empty-icon"><Upload size={19} /></span><div><strong>{share ? 'No files in this share yet' : 'Your files will show up here'}</strong><p>{canManage ? 'Pick a few things to get started.' : 'Open the share link from the host computer.'}</p></div></div> : <ul className="file-list">{allFiles.map((file, index) => <li className="file-row" key={file.id || `${file.name}-${index}`}><FileGlyph type={file.type} /><div className="file-meta"><strong title={file.name}>{file.name}</strong><span>{formatSize(file.size)}</span></div><button className="icon-button download-control" type="button" aria-label={`Download ${file.name}`} title="Download file" onClick={() => downloadFile(file)}><ArrowDownToLine size={17} /></button>{canManage && <button className="icon-button" type="button" aria-label={`Remove ${file.name}`} title="Remove file" onClick={() => share ? removeFile(file.id) : removePending(index)}><X size={17} /></button>}</li>)}</ul>}
+          {!share && canManage && <button className="primary-button start-button" disabled={busy} onClick={start}>{busy ? <LoaderCircle size={18} className="spin" /> : <Share2 size={18} />}{busy ? 'Getting things ready…' : 'Start sharing'}<span className="button-arrow">→</span></button>}
         </section>
 
-        <section className="message-panel"><div className="message-icon"><Link2 size={18} /></div><div className="message-body"><div className="message-title"><div><strong>Add a note or link</strong><span>A little context makes sharing nicer.</span></div><span className="optional">OPTIONAL</span></div><textarea value={message} maxLength={2000} onChange={(e) => setMessage(e.target.value)} placeholder="e.g. Here are the photos from today… or paste a link" rows={2} /><div className="message-actions"><span>{message.length}/2000</span><button className="text-button" onClick={saveMessage} disabled={!message.trim() && !share?.message}><Check size={15} /> Save note</button></div></div></section>
+        <section className="message-panel"><div className="message-icon"><Link2 size={18} /></div><div className="message-body"><div className="message-title"><div><strong>{canManage ? 'Add a note or link' : 'Note or link'}</strong><span>A little context makes sharing nicer.</span></div><span className="optional">OPTIONAL</span></div><textarea value={message} maxLength={2000} readOnly={!canManage} onChange={(e) => setMessage(e.target.value)} placeholder="e.g. Here are the photos from today… or paste a link" rows={2} /><div className="message-actions"><span>{message.length}/2000</span>{canManage && <button className="text-button" onClick={saveMessage} disabled={!message.trim() && !share?.message}><Check size={15} /> Save note</button>}</div></div></section>
         <div className="reassurance"><LockKeyhole size={14} /><span>Only people with your link can open this share. Stop it any time.</span></div>
       </section>
 
       <aside className="share-column">
         {share ? <div className="share-card active-card">
-          <div className="share-card-top"><span className="live-pill"><i /> LIVE NOW</span><button className="stop-button" onClick={stop} disabled={busy}><X size={15} /> Stop sharing</button></div>
+          <div className="share-card-top"><span className="live-pill"><i /> LIVE NOW</span>{canManage && <button className="stop-button" onClick={stop} disabled={busy}><X size={15} /> Stop sharing</button>}</div>
           <div className="share-card-title"><h2>Ready when<br />they are.</h2><p>Ask them to scan this code<br />with their phone camera.</p></div>
           <div className="qr-wrap">{qr ? <img src={qr} alt="QR code for your share link" /> : <div className="qr-placeholder"><QrCode size={28} /></div>}<span className="qr-corner corner-a"/><span className="qr-corner corner-b"/><span className="qr-corner corner-c"/><span className="qr-corner corner-d"/></div>
           <div className="link-box"><span>{activeUrl.replace('http://', '')}</span><button aria-label="Copy share link" onClick={copyLink}><Clipboard size={17} /></button></div>
