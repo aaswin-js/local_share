@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import QRCode from 'qrcode';
-import { ArrowDownToLine, ArrowLeft, Check, CheckCircle2, Clipboard, CloudUpload, File, FileArchive, FileAudio2, FileImage, FileText, FileVideo2, Link2, LoaderCircle, LockKeyhole, MonitorSmartphone, Plus, QrCode, Share2, Trash2, Upload, Wifi, X } from 'lucide-react';
+import { ArrowDownToLine, ArrowLeft, Check, CheckCircle2, Clipboard, CloudUpload, File, FileArchive, FileAudio2, FileImage, FileText, FileVideo2, Link2, LoaderCircle, LockKeyhole, MonitorSmartphone, Plus, QrCode, Share2, Upload, Wifi, X } from 'lucide-react';
 import './style.css';
 
 const formatSize = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : n < 1073741824 ? `${(n / 1048576).toFixed(1)} MB` : `${(n / 1073741824).toFixed(2)} GB`;
@@ -31,17 +31,14 @@ function FileGlyph({ type }) {
 
 function Host() {
   const [files, setFiles] = useState([]);
-  const [pending, setPending] = useState([]);
   const [share, setShare] = useState(null);
   const [canManage, setCanManage] = useState(false);
   const [address, setAddress] = useState('');
   const [port, setPort] = useState(5173);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
-  const [dragging, setDragging] = useState(false);
   const [notice, setNotice] = useState('');
   const [qr, setQr] = useState('');
-  const inputRef = useRef(null);
   const activeUrl = useMemo(() => share && address ? `http://${address}:${port}/s/${share.id}` : '', [share, address, port]);
 
   useEffect(() => {
@@ -54,18 +51,18 @@ function Host() {
   useEffect(() => { if (activeUrl) QRCode.toDataURL(activeUrl, { width: 190, margin: 1, color: { dark: '#182441', light: '#ffffff' } }).then(setQr).catch(() => {}); }, [activeUrl]);
   useEffect(() => { if (!notice) return; const timer = setTimeout(() => setNotice(''), 2800); return () => clearTimeout(timer); }, [notice]);
 
-  const takeFiles = (list) => {
-    const incoming = Array.from(list || []);
-    if (!incoming.length) return;
-    if (share) { void addFiles(incoming); }
-    else setPending((current) => [...current, ...incoming]);
-  };
-  const addFiles = async (incoming) => {
+  const pickFiles = async (mode) => {
     setBusy(true);
     try {
-      const form = new FormData(); incoming.forEach((file) => form.append('files', file));
-      const result = await api('/api/files', { method: 'POST', body: form });
-      setFiles(result.share.files); setShare(result.share); setNotice(incoming.length > 1 ? 'Files added to your share' : 'File added to your share');
+      let current = share;
+      if (!current) {
+        const started = await api('/api/share', { method: 'POST' });
+        current = started.share;
+        setShare(current);
+      }
+      const result = await api('/api/pick', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }) });
+      setFiles(result.share.files); setShare(result.share);
+      setNotice(result.added ? `${result.added} ${result.added === 1 ? 'file' : 'files'} added by location` : 'No files selected');
     } catch (error) { setNotice(error.message); }
     finally { setBusy(false); }
   };
@@ -74,11 +71,6 @@ function Host() {
     try {
       const result = await api('/api/share', { method: 'POST' });
       setShare(result.share); setFiles(result.share.files);
-      if (pending.length) {
-        const form = new FormData(); pending.forEach((file) => form.append('files', file));
-        const uploaded = await api('/api/files', { method: 'POST', body: form });
-        setFiles(uploaded.share.files); setShare(uploaded.share); setPending([]);
-      }
       if (message.trim()) {
         const noted = await api('/api/message', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message }) });
         setShare(noted.share);
@@ -87,7 +79,6 @@ function Host() {
     } catch (error) { setNotice(error.message); }
     finally { setBusy(false); }
   };
-  const removePending = (index) => setPending((items) => items.filter((_, i) => i !== index));
   const removeFile = async (id) => {
     try { const result = await api(`/api/files/${id}`, { method: 'DELETE' }); setFiles(result.share.files); setShare(result.share); }
     catch (error) { setNotice(error.message); }
@@ -112,7 +103,7 @@ function Host() {
   };
   const stop = async () => {
     setBusy(true);
-    try { await api('/api/share', { method: 'DELETE' }); setShare(null); setFiles([]); setPending([]); setMessage(''); setQr(''); setNotice('Sharing stopped. Your files were cleared.'); }
+    try { await api('/api/share', { method: 'DELETE' }); setShare(null); setFiles([]); setMessage(''); setQr(''); setNotice('Sharing stopped. The shared file locations were cleared.'); }
     catch (error) { setNotice(error.message); }
     finally { setBusy(false); }
   };
@@ -120,24 +111,23 @@ function Host() {
     try { await navigator.clipboard.writeText(activeUrl); setNotice('Share link copied'); }
     catch { setNotice(activeUrl); }
   };
-  const allFiles = share ? files : pending;
+  const allFiles = files;
 
-  return <div className="app-shell" onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setDragging(false); }} onDrop={(e) => { e.preventDefault(); setDragging(false); takeFiles(e.dataTransfer.files); }}>
+  return <div className="app-shell">
     <Header />
     <main className="host-layout">
       <section className="main-column">
         <div className="intro"><span className="eyebrow"><span className="eyebrow-line" /> SEND IT CLOSE BY</span><h1>Good things are<br /><em>better shared.</em></h1><p>Send files to people on the same Wi-Fi. No accounts, no cloud, just nearby.</p></div>
-        {canManage && <section className={`dropzone ${dragging ? 'is-dragging' : ''}`} aria-label="Add files" onClick={() => inputRef.current?.click()}>
-          <input ref={inputRef} type="file" multiple hidden onChange={(e) => { takeFiles(e.target.files); e.target.value = ''; }} />
+        {canManage && <section className="dropzone" aria-label="Choose files or folder">
           <span className="upload-icon"><CloudUpload size={24} /></span>
-          <div className="drop-copy"><strong>Drop files here</strong><span>or browse from your device</span></div>
-          <button className="outline-button" type="button" onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }}><Plus size={17} /> Choose files</button>
-          <small>Up to 2 GB per file · stays on your local network</small>
+          <div className="drop-copy"><strong>Share from this computer</strong><span>Only file locations are saved; contents are read when downloaded</span></div>
+          <div className="picker-buttons"><button className="outline-button" type="button" disabled={busy} onClick={() => pickFiles('files')}><Plus size={17} /> Choose files</button><button className="outline-button" type="button" disabled={busy} onClick={() => pickFiles('folder')}><Plus size={17} /> Choose folder</button></div>
+          <small>Windows location picker · host computer must stay on</small>
         </section>}
 
         <section className="file-section">
-          <div className="section-heading"><div><span className="eyebrow muted">YOUR SHARE</span><h2>Files <span className="count">{allFiles.length}</span></h2></div>{share && canManage && <button className="text-button" onClick={() => inputRef.current?.click()}><Plus size={16} /> Add more</button>}</div>
-          {allFiles.length === 0 ? <div className="empty-files"><span className="empty-icon"><Upload size={19} /></span><div><strong>{share ? 'No files in this share yet' : 'Your files will show up here'}</strong><p>{canManage ? 'Pick a few things to get started.' : 'Open the share link from the host computer.'}</p></div></div> : <ul className="file-list">{allFiles.map((file, index) => <li className="file-row" key={file.id || `${file.name}-${index}`}><FileGlyph type={file.type} /><div className="file-meta"><strong title={file.name}>{file.name}</strong><span>{formatSize(file.size)}</span></div><button className="icon-button download-control" type="button" aria-label={`Download ${file.name}`} title="Download file" onClick={() => downloadFile(file)}><ArrowDownToLine size={17} /></button>{canManage && <button className="icon-button" type="button" aria-label={`Remove ${file.name}`} title="Remove file" onClick={() => share ? removeFile(file.id) : removePending(index)}><X size={17} /></button>}</li>)}</ul>}
+          <div className="section-heading"><div><span className="eyebrow muted">YOUR SHARE</span><h2>Files <span className="count">{allFiles.length}</span></h2></div>{share && canManage && <button className="text-button" onClick={() => pickFiles('files')} disabled={busy}><Plus size={16} /> Add files</button>}</div>
+          {allFiles.length === 0 ? <div className="empty-files"><span className="empty-icon"><Upload size={19} /></span><div><strong>{share ? 'No files in this share yet' : 'Your files will show up here'}</strong><p>{canManage ? 'Choose files or a folder to get started.' : 'Open the share link from the host computer.'}</p></div></div> : <ul className="file-list">{allFiles.map((file) => <li className="file-row" key={file.id}><FileGlyph type={file.type} /><div className="file-meta"><strong title={file.name}>{file.name}</strong><span>{formatSize(file.size)}</span></div><button className="icon-button download-control" type="button" aria-label={`Download ${file.name}`} title="Download file" onClick={() => downloadFile(file)}><ArrowDownToLine size={17} /></button>{canManage && <button className="icon-button" type="button" aria-label={`Remove ${file.name}`} title="Remove file" onClick={() => removeFile(file.id)}><X size={17} /></button>}</li>)}</ul>}
           {!share && canManage && <button className="primary-button start-button" disabled={busy} onClick={start}>{busy ? <LoaderCircle size={18} className="spin" /> : <Share2 size={18} />}{busy ? 'Getting things ready…' : 'Start sharing'}<span className="button-arrow">→</span></button>}
         </section>
 
@@ -163,7 +153,6 @@ function Host() {
       </aside>
     </main>
     <footer className="page-footer"><span>nearby <span className="footer-dot">•</span> Share close by</span><span>Made for the moments right next to you.</span></footer>
-    {dragging && <div className="drag-overlay"><div><CloudUpload size={38} /><strong>Drop them here</strong></div></div>}
     {notice && <div className="toast" role="status"><CheckCircle2 size={17} />{notice}<button onClick={() => setNotice('')} aria-label="Dismiss"><X size={15} /></button></div>}
   </div>;
 }

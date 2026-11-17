@@ -1,28 +1,22 @@
 import express from 'express';
-import multer from 'multer';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = Number(process.env.PORT || 3000);
-// Keep share data beside the server so a browser reload or server restart does
-// not orphan files in the operating system's temporary directory.
+// Keep only share metadata and original paths. Downloads are read from the
+// selected locations on demand; the server does not make file copies.
 const dataRoot = path.join(here, 'data');
-const uploadRoot = path.join(dataRoot, 'shares');
 const stateFile = path.join(dataRoot, 'active-share.json');
-fs.mkdirSync(uploadRoot, { recursive: true });
+fs.mkdirSync(dataRoot, { recursive: true });
 app.use(express.json({ limit: '1mb' }));
 
 let share = null;
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, share?.directory || uploadRoot),
-  filename: (_req, file, cb) => cb(null, `${crypto.randomUUID()}-${path.basename(file.originalname)}`)
-});
-const upload = multer({ storage, limits: { fileSize: 2 * 1024 * 1024 * 1024, files: 30 } });
 
 function localAddress() {
   const interfaces = os.networkInterfaces();
@@ -70,9 +64,7 @@ function persistShare() {
     id: share.id,
     message: share.message,
     createdAt: share.createdAt,
-    files: share.files.map(({ id, name, size, type, path: filePath }) => ({
-      id, name, size, type, diskName: path.basename(filePath)
-    }))
+    files: share.files.map(({ id, name, size, type, path: filePath }) => ({ id, name, size, type, path: filePath }))
   };
   const temporary = `${stateFile}.tmp`;
   fs.writeFileSync(temporary, JSON.stringify(state), 'utf8');
@@ -82,14 +74,13 @@ function restoreShare() {
   try {
     const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
     if (!/^[a-f0-9]{32}$/.test(state.id) || !Array.isArray(state.files)) throw new Error('Invalid share state');
-    const directory = path.join(uploadRoot, state.id);
     const files = state.files.flatMap((file) => {
-      if (typeof file.diskName !== 'string' || path.basename(file.diskName) !== file.diskName) return [];
-      const filePath = path.join(directory, file.diskName);
-      if (!fs.existsSync(filePath)) return [];
+      if (typeof file.path !== 'string' || !path.isAbsolute(file.path)) return [];
+      const filePath = file.path;
+      try { if (!fs.statSync(filePath).isFile()) return []; } catch { return []; }
       return [{ id: file.id, name: file.name, size: file.size, type: file.type, path: filePath }];
     });
-    share = { id: state.id, directory, files, message: String(state.message || ''), createdAt: state.createdAt || Date.now() };
+    share = { id: state.id, files, message: String(state.message || ''), createdAt: state.createdAt || Date.now() };
     persistShare();
   } catch {
     share = null;
@@ -99,15 +90,15 @@ function restoreShare() {
 function ensureShare() {
   if (!share) {
     const id = crypto.randomBytes(16).toString('hex');
-    const directory = path.join(uploadRoot, id);
-    fs.mkdirSync(directory, { recursive: true });
-    share = { id, directory, files: [], message: '', createdAt: Date.now() };
+    share = { id, files: [], message: '', createdAt: Date.now() };
   }
   persistShare();
   return share;
 }
 
 restoreShare();
+// Remove uploads made by older versions of the app, which stored copies here.
+fs.rmSync(path.join(dataRoot, 'shares'), { recursive: true, force: true });
 
 app.get('/api/network', (_req, res) => res.json({ address: localAddress(), devPort: 5173, prodPort: port }));
 // The LAN dashboard can show the current share to nearby devices, but only
@@ -117,23 +108,37 @@ app.post('/api/share', hostOnly, (_req, res) => {
   const current = ensureShare();
   res.json({ share: publicShare(), id: current.id });
 });
-app.post('/api/files', hostOnly, (req, res, next) => {
+app.post('/api/pick', hostOnly, (req, res) => {
+  if (process.platform !== 'win32') return res.status(501).json({ error: 'Location-only picking currently requires Windows.' });
   if (!share) return res.status(409).json({ error: 'Start sharing before adding files.' });
-  upload.array('files', 30)(req, res, (error) => {
-    if (error) return next(error);
-    for (const file of req.files || []) {
-      share.files.push({ id: crypto.randomUUID(), name: file.originalname, size: file.size, type: file.mimetype, path: file.path });
-    }
+  try {
+    const mode = req.body?.mode === 'folder' ? 'folder' : 'files';
+    const script = mode === 'folder'
+      ? `Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Choose a folder to share'; if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $p = Get-ChildItem -LiteralPath $d.SelectedPath -File -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }; ConvertTo-Json -InputObject @{ root = $d.SelectedPath; paths = @($p) } -Compress } else { '{\"root\":\"\",\"paths\":[]}' }`
+      : `Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = 'Choose files to share'; $d.Multiselect = $true; if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { ConvertTo-Json -InputObject @{ root = ''; paths = @($d.FileNames) } -Compress } else { '{\"root\":\"\",\"paths\":[]}' }`;
+    const output = execFileSync('powershell.exe', ['-NoProfile', '-STA', '-Command', script], { encoding: 'utf8', windowsHide: false, maxBuffer: 16 * 1024 * 1024 }).trim();
+    const result = JSON.parse(output || '{"root":"","paths":[]}');
+    const paths = Array.isArray(result.paths) ? result.paths : [result.paths].filter(Boolean);
+    const additions = paths.flatMap((filePath) => {
+      try {
+        const stat = fs.statSync(filePath);
+        if (!stat.isFile()) return [];
+        const name = mode === 'folder' ? path.relative(result.root, filePath) : path.basename(filePath);
+        return [{ id: crypto.randomUUID(), name: name.replaceAll('\\', '/'), size: stat.size, type: 'application/octet-stream', path: filePath }];
+      } catch { return []; }
+    });
+    share.files.push(...additions);
     persistShare();
-    res.json({ share: publicShare() });
-  });
+    res.json({ share: publicShare(), added: additions.length });
+  } catch (error) {
+    res.status(500).json({ error: `Could not open the Windows picker: ${error.message}` });
+  }
 });
 app.delete('/api/files/:id', hostOnly, (req, res) => {
   if (!share) return res.status(404).json({ error: 'No active share.' });
   const index = share.files.findIndex((file) => file.id === req.params.id);
   if (index < 0) return res.status(404).json({ error: 'File not found.' });
-  const [file] = share.files.splice(index, 1);
-  fs.rm(file.path, { force: true }, () => {});
+  share.files.splice(index, 1);
   persistShare();
   res.json({ share: publicShare() });
 });
@@ -151,18 +156,16 @@ app.get('/api/public/:id/files/:fileId', (req, res) => {
   if (!share || share.id !== req.params.id) return res.status(404).send('This share has ended.');
   const file = share.files.find((item) => item.id === req.params.fileId);
   if (!file || !fs.existsSync(file.path)) return res.status(404).send('File not found.');
-  res.download(file.path, file.name);
+  res.download(file.path, path.basename(file.name));
 });
 app.delete('/api/share', hostOnly, (_req, res) => {
-  if (share) fs.rm(share.directory, { recursive: true, force: true }, () => {});
   share = null;
   persistShare();
   res.json({ ok: true });
 });
 
 app.use((error, _req, res, _next) => {
-  const status = error instanceof multer.MulterError ? 400 : 500;
-  res.status(status).json({ error: error.message || 'Something went wrong.' });
+  res.status(500).json({ error: error.message || 'Something went wrong.' });
 });
 
 const dist = path.resolve(here, '../dist');
